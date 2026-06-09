@@ -19,9 +19,9 @@ log = logging.getLogger("WorldEngine")
 DATABASE_URL = os.getenv("DATABASE_URL")
 WORLD_EPOCH  = date(2026, 6, 9)
 
-MAX_EVENTOS_TOTAL    = 10_000
-MAX_DIGISERES_TOTAL  = 200
-DB_DANGER_THRESHOLD  = 0.80
+MAX_EVENTOS_TOTAL    = 50_000
+MAX_DIGISERES_TOTAL  = 500
+DB_DANGER_THRESHOLD  = 0.85
 EVENTOS_POR_TICK     = 8
 
 def world_day() -> int:
@@ -505,9 +505,15 @@ async def world_tick():
     finally:
         await conn.close()
 
+
+# Variable global para pausar desde main.py
+_scheduler_instance = None
+
 def start_engine():
+    global _scheduler_instance
     scheduler = AsyncIOScheduler()
     scheduler.add_job(world_tick, 'interval', seconds=15, id='world_tick')
     scheduler.start()
-    log.info("Motor del mundo iniciado — tick cada 5 minutos")
+    _scheduler_instance = scheduler
+    log.info("Motor del mundo iniciado — tick cada 15 segundos")
     return scheduler
