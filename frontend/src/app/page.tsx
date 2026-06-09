@@ -450,7 +450,7 @@ function SVGMap({digis,sprites,selectedId,onSelect,fusionSel,onDragFusion,dragDi
       <text x="400" y="305" fontFamily="Cinzel Decorative, serif" fontSize="12" fill="#C9A84C" opacity="0.35" textAnchor="middle">⊕</text>
 
       {/* DIGISERES */}
-      {digis.map(d=>{
+      {digis.map((d:any)=>{
         const [cx,cy]=posToCanvas(d.pos_x,d.pos_y,d.bioma_slug)
         const isSel=selectedId===d.id
         const inFusion=fusionSel?.find((x:any)=>x.id===d.id)
