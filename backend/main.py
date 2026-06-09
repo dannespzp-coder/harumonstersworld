@@ -9,8 +9,10 @@ import jwt
 import os
 import math
 from datetime import datetime, timedelta, date
+from world_engine import start_engine
 
 app = FastAPI(title="Harumonstersworld API")
+_scheduler = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,6 +73,7 @@ def require_god(user=Depends(current_user)):
 # ── Startup: crear usuario dios si no existe ─────────
 @app.on_event("startup")
 async def startup():
+    global _scheduler
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         exists = await conn.fetchrow("SELECT id FROM usuarios WHERE username='haru'")
@@ -82,6 +85,14 @@ async def startup():
             )
     finally:
         await conn.close()
+    # Arrancar motor del mundo
+    _scheduler = start_engine()
+
+@app.on_event("shutdown")
+async def shutdown():
+    global _scheduler
+    if _scheduler:
+        _scheduler.shutdown()
 
 # ── MODELOS ───────────────────────────────────────────
 class LoginBody(BaseModel):
@@ -408,3 +419,97 @@ async def get_eventos(db=Depends(get_db)):
 async def get_mitologia(db=Depends(get_db)):
     rows = await db.fetch("SELECT * FROM mitologia ORDER BY dia_origen ASC")
     return [dict(r) for r in rows]
+
+# ── Reset mundo ───────────────────────────────────────
+@app.post("/world/reset")
+async def reset_world(user=Depends(require_god), db=Depends(get_db)):
+    result = await db.fetchval("SELECT reiniciar_mundo()")
+    return {"ok": True, "msg": result}
+
+# ── Fusión ────────────────────────────────────────────
+class FusionBody(BaseModel):
+    ser_a: str
+    ser_b: str
+    tipo: str = "temporal"
+
+@app.post("/fusion")
+async def crear_fusion(body: FusionBody, user=Depends(current_user), db=Depends(get_db)):
+    da = await db.fetchrow("SELECT * FROM digiseres WHERE id=$1 AND vivo=TRUE", body.ser_a)
+    db2 = await db.fetchrow("SELECT * FROM digiseres WHERE id=$1 AND vivo=TRUE", body.ser_b)
+    if not da or not db2:
+        raise HTTPException(status_code=404, detail="Digiser no encontrado")
+    # Solo puede fusionar si es dios o es su propio digiser
+    if user["role"] not in ("god","demigod"):
+        if str(da["tamer_id"]) != str(user["id"]) and str(db2["tamer_id"]) != str(user["id"]):
+            raise HTTPException(status_code=403, detail="Solo puedes fusionar tu propio digiser")
+
+    # Calcular stats del fusionado
+    nombre_fusion = f"{da['nombre'][:5]}+{db2['nombre'][:5]}"
+    genes = (da['genes_divinos'] + db2['genes_divinos']) * 0.8
+    bioma_id = da['bioma_id']
+
+    resultado_id = await db.fetchval("""
+        INSERT INTO digiseres
+          (nombre, bioma_id, nivel, etapa, genes_divinos, pos_x, pos_y,
+           hp, hp_max, fuerza, inteligencia, velocidad,
+           fe, caos, lealtad, agresion, curiosidad,
+           alineamiento, elemento, api_species, status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'idle')
+        RETURNING id
+    """,
+        nombre_fusion, bioma_id,
+        min(100, (da['nivel'] + db2['nivel']) // 2 + 10),
+        max(da['etapa'], db2['etapa']),
+        genes,
+        (da['pos_x'] + db2['pos_x']) / 2,
+        (da['pos_y'] + db2['pos_y']) / 2,
+        da['hp_max'] + db2['hp_max'],
+        da['hp_max'] + db2['hp_max'],
+        int((da['fuerza'] + db2['fuerza']) * 0.9),
+        int((da['inteligencia'] + db2['inteligencia']) * 0.9),
+        int((da['velocidad'] + db2['velocidad']) * 0.9),
+        (da['fe'] + db2['fe']) / 2,
+        (da['caos'] + db2['caos']) / 2,
+        (da['lealtad'] + db2['lealtad']) / 2,
+        (da['agresion'] + db2['agresion']) / 2,
+        (da['curiosidad'] + db2['curiosidad']) / 2,
+        da['alineamiento'], da['elemento'], da['api_species']
+    )
+
+    # Registrar fusión
+    await db.execute("""
+        INSERT INTO fusiones_activas (ser_a, ser_b, resultado_id, tipo, dias_restantes, iniciada_dia)
+        VALUES ($1,$2,$3,$4,$5,$6)
+    """, body.ser_a, body.ser_b, resultado_id, body.tipo,
+        7 if body.tipo == 'temporal' else None, world_day())
+
+    # Desactivar originales si permanente
+    if body.tipo == 'permanente':
+        await db.execute("UPDATE digiseres SET vivo=FALSE WHERE id=$1 OR id=$2", body.ser_a, body.ser_b)
+
+    await db.execute("""
+        INSERT INTO eventos (ser_id, tipo, descripcion, dia_mundo)
+        VALUES ($1,'FUSION',$2,$3)
+    """, resultado_id, f"Nació de la fusión de {da['nombre']} y {db2['nombre']}.", world_day())
+
+    await db.execute("""
+        INSERT INTO yggmon_log (tipo, descripcion, objetivo_id, dia_mundo)
+        VALUES ('FUSIÓN',$1,$2,$3)
+    """, f"{da['nombre']} y {db2['nombre']} se fusionaron en {nombre_fusion}.", resultado_id, world_day())
+
+    return {"ok": True, "resultado_id": str(resultado_id), "nombre": nombre_fusion}
+
+# ── Config mundo ──────────────────────────────────────
+@app.get("/world/config")
+async def get_config(user=Depends(require_god), db=Depends(get_db)):
+    rows = await db.fetch("SELECT * FROM mundo_config")
+    return {r['key']: r['value'] for r in rows}
+
+@app.patch("/world/config")
+async def update_config(data: dict, user=Depends(require_god), db=Depends(get_db)):
+    for k, v in data.items():
+        await db.execute(
+            "INSERT INTO mundo_config (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2",
+            k, str(v)
+        )
+    return {"ok": True}
