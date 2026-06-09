@@ -432,72 +432,7 @@ class FusionBody(BaseModel):
     ser_b: str
     tipo: str = "temporal"
 
-@app.post("/fusion")
-async def crear_fusion(body: FusionBody, user=Depends(current_user), db=Depends(get_db)):
-    da = await db.fetchrow("SELECT * FROM digiseres WHERE id=$1 AND vivo=TRUE", body.ser_a)
-    db2 = await db.fetchrow("SELECT * FROM digiseres WHERE id=$1 AND vivo=TRUE", body.ser_b)
-    if not da or not db2:
-        raise HTTPException(status_code=404, detail="Digiser no encontrado")
-    # Solo puede fusionar si es dios o es su propio digiser
-    if user["role"] not in ("god","demigod"):
-        if str(da["tamer_id"]) != str(user["id"]) and str(db2["tamer_id"]) != str(user["id"]):
-            raise HTTPException(status_code=403, detail="Solo puedes fusionar tu propio digiser")
 
-    # Calcular stats del fusionado
-    nombre_fusion = f"{da['nombre'][:5]}+{db2['nombre'][:5]}"
-    genes = (da['genes_divinos'] + db2['genes_divinos']) * 0.8
-    bioma_id = da['bioma_id']
-
-    resultado_id = await db.fetchval("""
-        INSERT INTO digiseres
-          (nombre, bioma_id, nivel, etapa, genes_divinos, pos_x, pos_y,
-           hp, hp_max, fuerza, inteligencia, velocidad,
-           fe, caos, lealtad, agresion, curiosidad,
-           alineamiento, elemento, api_species, status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'idle')
-        RETURNING id
-    """,
-        nombre_fusion, bioma_id,
-        min(100, (da['nivel'] + db2['nivel']) // 2 + 10),
-        max(da['etapa'], db2['etapa']),
-        genes,
-        (da['pos_x'] + db2['pos_x']) / 2,
-        (da['pos_y'] + db2['pos_y']) / 2,
-        da['hp_max'] + db2['hp_max'],
-        da['hp_max'] + db2['hp_max'],
-        int((da['fuerza'] + db2['fuerza']) * 0.9),
-        int((da['inteligencia'] + db2['inteligencia']) * 0.9),
-        int((da['velocidad'] + db2['velocidad']) * 0.9),
-        (da['fe'] + db2['fe']) / 2,
-        (da['caos'] + db2['caos']) / 2,
-        (da['lealtad'] + db2['lealtad']) / 2,
-        (da['agresion'] + db2['agresion']) / 2,
-        (da['curiosidad'] + db2['curiosidad']) / 2,
-        da['alineamiento'], da['elemento'], da['api_species']
-    )
-
-    # Registrar fusión
-    await db.execute("""
-        INSERT INTO fusiones_activas (ser_a, ser_b, resultado_id, tipo, dias_restantes, iniciada_dia)
-        VALUES ($1,$2,$3,$4,$5,$6)
-    """, body.ser_a, body.ser_b, resultado_id, body.tipo,
-        7 if body.tipo == 'temporal' else None, world_day())
-
-    # Desactivar originales si permanente
-    if body.tipo == 'permanente':
-        await db.execute("UPDATE digiseres SET vivo=FALSE WHERE id=$1 OR id=$2", body.ser_a, body.ser_b)
-
-    await db.execute("""
-        INSERT INTO eventos (ser_id, tipo, descripcion, dia_mundo)
-        VALUES ($1,'FUSION',$2,$3)
-    """, resultado_id, f"Nació de la fusión de {da['nombre']} y {db2['nombre']}.", world_day())
-
-    await db.execute("""
-        INSERT INTO yggmon_log (tipo, descripcion, objetivo_id, dia_mundo)
-        VALUES ('FUSIÓN',$1,$2,$3)
-    """, f"{da['nombre']} y {db2['nombre']} se fusionaron en {nombre_fusion}.", resultado_id, world_day())
-
-    return {"ok": True, "resultado_id": str(resultado_id), "nombre": nombre_fusion}
 
 # ── Config mundo ──────────────────────────────────────
 @app.get("/world/config")
@@ -513,3 +448,124 @@ async def update_config(data: dict, user=Depends(require_god), db=Depends(get_db
             k, str(v)
         )
     return {"ok": True}
+
+# ══════════════════════════════════════════
+# Agregar al final de main.py
+# ══════════════════════════════════════════
+
+import re as _re
+
+# Estado global de pausa
+_world_paused = False
+
+class PauseBody(BaseModel):
+    paused: bool
+
+@app.post("/world/pause")
+async def pause_world(body: PauseBody, user=Depends(require_god)):
+    global _world_paused
+    _world_paused = body.paused
+    # Pausar/reanudar el scheduler
+    from world_engine import _scheduler_instance
+    if _scheduler_instance:
+        if body.paused:
+            _scheduler_instance.pause()
+        else:
+            _scheduler_instance.resume()
+    return {"ok": True, "paused": _world_paused}
+
+@app.get("/world/paused")
+async def get_paused():
+    return {"paused": _world_paused}
+
+# ══════════════════════════════════════════
+# Reemplazar el endpoint /fusion completo
+# ══════════════════════════════════════════
+
+def _nombre_fusion(a: str, b: str) -> str:
+    """Genera nombre cool combinando dos nombres"""
+    a = _re.sub(r'\s*\(.*?\)|Cría de\s*', '', a).strip()
+    b = _re.sub(r'\s*\(.*?\)|Cría de\s*', '', b).strip()
+    if not a: a = 'Ser'
+    if not b: b = 'Void'
+    mid_a, mid_b = max(1, len(a)//2), max(1, len(b)//2)
+    opts = [
+        a[:mid_a+1] + b[mid_b:],
+        b[:mid_b+1] + a[mid_a:],
+        a[:3] + b[-3:],
+        b[:3] + a[-3:],
+        a[:2] + b[1:3] + a[-2:],
+    ]
+    opts = [o.capitalize() for o in opts if 4 <= len(o) <= 14]
+    return random.choice(opts) if opts else (a[:4]+b[:4]).capitalize()
+
+@app.post("/fusion")
+async def crear_fusion(body: FusionBody, user=Depends(current_user), db=Depends(get_db)):
+    da = await db.fetchrow("SELECT * FROM digiseres WHERE id=$1 AND vivo=TRUE", body.ser_a)
+    db2 = await db.fetchrow("SELECT * FROM digiseres WHERE id=$1 AND vivo=TRUE", body.ser_b)
+    if not da or not db2:
+        raise HTTPException(status_code=404, detail="Digiser no encontrado")
+    if user["role"] not in ("god","demigod"):
+        if str(da["tamer_id"]) != str(user["id"]) and str(db2["tamer_id"]) != str(user["id"]):
+            raise HTTPException(status_code=403, detail="Solo puedes fusionar tu propio digiser")
+
+    nombre_fusion = _nombre_fusion(da['nombre'], db2['nombre'])
+    genes = (da['genes_divinos'] + db2['genes_divinos']) * 0.85
+
+    resultado_id = await db.fetchval("""
+        INSERT INTO digiseres
+          (nombre, bioma_id, nivel, etapa, genes_divinos, pos_x, pos_y,
+           hp, hp_max, fuerza, inteligencia, velocidad,
+           fe, caos, lealtad, agresion, curiosidad,
+           alineamiento, elemento, api_species, status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'idle')
+        RETURNING id
+    """,
+        nombre_fusion, da['bioma_id'],
+        min(100, (da['nivel'] + db2['nivel']) // 2 + 10),
+        max(da['etapa'], db2['etapa']),
+        genes,
+        (da['pos_x'] + db2['pos_x']) / 2,
+        (da['pos_y'] + db2['pos_y']) / 2,
+        da['hp_max'] + db2['hp_max'],
+        da['hp_max'] + db2['hp_max'],
+        int((da['fuerza'] + db2['fuerza']) * 0.92),
+        int((da['inteligencia'] + db2['inteligencia']) * 0.92),
+        int((da['velocidad'] + db2['velocidad']) * 0.92),
+        (da['fe'] + db2['fe']) / 2,
+        (da['caos'] + db2['caos']) / 2,
+        (da['lealtad'] + db2['lealtad']) / 2,
+        (da['agresion'] + db2['agresion']) / 2,
+        (da['curiosidad'] + db2['curiosidad']) / 2,
+        da['alineamiento'], da['elemento'], da['api_species']
+    )
+
+    # Ocultar originales (pos -99 = fuera del mapa)
+    await db.execute(
+        "UPDATE digiseres SET status='resting', pos_x=-99, pos_y=-99 WHERE id=$1 OR id=$2",
+        body.ser_a, body.ser_b
+    )
+
+    # Registrar fusión
+    await db.execute("""
+        INSERT INTO fusiones_activas (ser_a, ser_b, resultado_id, tipo, dias_restantes, iniciada_dia)
+        VALUES ($1,$2,$3,$4,$5,$6)
+    """, body.ser_a, body.ser_b, resultado_id, body.tipo,
+        7 if body.tipo == 'temporal' else None, world_day())
+
+    # Si permanente, matar los originales
+    if body.tipo == 'permanente':
+        await db.execute("UPDATE digiseres SET vivo=FALSE, status='dead' WHERE id=$1 OR id=$2",
+            body.ser_a, body.ser_b)
+
+    await db.execute("""
+        INSERT INTO eventos (ser_id, tipo, descripcion, dia_mundo)
+        VALUES ($1,'FUSION',$2,$3)
+    """, resultado_id, f"Nació de la fusión de {da['nombre']} y {db2['nombre']}.", world_day())
+
+    await db.execute("""
+        INSERT INTO yggmon_log (tipo, descripcion, objetivo_id, dia_mundo)
+        VALUES ('FUSIÓN',$1,$2,$3)
+    """, f"{da['nombre']} + {db2['nombre']} = {nombre_fusion}", resultado_id, world_day())
+
+    return {"ok": True, "resultado_id": str(resultado_id), "nombre": nombre_fusion}
