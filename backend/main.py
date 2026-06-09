@@ -25,7 +25,7 @@ app.add_middleware(
 DATABASE_URL = os.getenv("DATABASE_URL")
 JWT_SECRET   = os.getenv("JWT_SECRET", "harumonstersworld_secret")
 GOD_PASSWORD = os.getenv("GOD_PASSWORD", "danielharu123")
-WORLD_EPOCH  = date(2025, 1, 1)
+WORLD_EPOCH  = date(2026, 6, 9)
 
 security = HTTPBearer()
 
